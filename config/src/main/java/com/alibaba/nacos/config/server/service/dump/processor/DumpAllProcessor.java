@@ -16,10 +16,10 @@
 
 package com.alibaba.nacos.config.server.service.dump.processor;
 
+import com.alibaba.nacos.common.task.NacosTask;
 import com.alibaba.nacos.common.utils.MD5Utils;
 import com.alibaba.nacos.config.server.constant.Constants;
-import com.alibaba.nacos.config.server.manager.AbstractTask;
-import com.alibaba.nacos.config.server.manager.TaskProcessor;
+import com.alibaba.nacos.common.task.NacosTaskProcessor;
 import com.alibaba.nacos.config.server.model.ConfigInfoWrapper;
 import com.alibaba.nacos.config.server.model.Page;
 import com.alibaba.nacos.config.server.service.AggrWhitelist;
@@ -39,7 +39,7 @@ import static com.alibaba.nacos.config.server.utils.LogUtil.DEFAULT_LOG;
  * @author Nacos
  * @date 2020/7/5 12:19 PM
  */
-public class DumpAllProcessor implements TaskProcessor {
+public class DumpAllProcessor implements NacosTaskProcessor {
     
     public DumpAllProcessor(DumpService dumpService) {
         this.dumpService = dumpService;
@@ -47,7 +47,7 @@ public class DumpAllProcessor implements TaskProcessor {
     }
     
     @Override
-    public boolean process(String taskType, AbstractTask task) {
+    public boolean process(NacosTask task) {
         long currentMaxId = persistService.findConfigMaxId();
         long lastMaxId = 0;
         while (lastMaxId < currentMaxId) {
@@ -55,7 +55,7 @@ public class DumpAllProcessor implements TaskProcessor {
             if (page != null && page.getPageItems() != null && !page.getPageItems().isEmpty()) {
                 for (ConfigInfoWrapper cf : page.getPageItems()) {
                     long id = cf.getId();
-                    lastMaxId = id > lastMaxId ? id : lastMaxId;
+                    lastMaxId = Math.max(id, lastMaxId);
                     if (cf.getDataId().equals(AggrWhitelist.AGGRIDS_METADATA)) {
                         AggrWhitelist.load(cf.getContent());
                     }
@@ -67,10 +67,9 @@ public class DumpAllProcessor implements TaskProcessor {
                     if (cf.getDataId().equals(SwitchService.SWITCH_META_DATAID)) {
                         SwitchService.load(cf.getContent());
                     }
-                    
-                    boolean result = ConfigCacheService
-                            .dump(cf.getDataId(), cf.getGroup(), cf.getTenant(), cf.getContent(), cf.getLastModified(),
-                                    cf.getType());
+    
+                    ConfigCacheService.dump(cf.getDataId(), cf.getGroup(), cf.getTenant(), cf.getContent(),
+                            cf.getLastModified(), cf.getType(), cf.getEncryptedDataKey());
                     
                     final String content = cf.getContent();
                     final String md5 = MD5Utils.md5Hex(content, Constants.ENCODE);

@@ -16,32 +16,18 @@
 
 package com.alibaba.nacos.naming.healthcheck;
 
-import com.alibaba.nacos.common.utils.JacksonUtils;
-import com.alibaba.nacos.core.cluster.Member;
-import com.alibaba.nacos.core.cluster.ServerMemberManager;
-import com.alibaba.nacos.core.utils.ApplicationUtils;
+import com.alibaba.nacos.common.notify.NotifyCenter;
+import com.alibaba.nacos.common.trace.event.naming.HealthStateChangeTraceEvent;
 import com.alibaba.nacos.naming.core.Cluster;
 import com.alibaba.nacos.naming.core.DistroMapper;
 import com.alibaba.nacos.naming.core.Instance;
 import com.alibaba.nacos.naming.core.Service;
-import com.alibaba.nacos.naming.misc.GlobalExecutor;
-import com.alibaba.nacos.naming.misc.HttpClient;
 import com.alibaba.nacos.naming.misc.Loggers;
-import com.alibaba.nacos.naming.misc.NetUtils;
 import com.alibaba.nacos.naming.misc.SwitchDomain;
 import com.alibaba.nacos.naming.misc.UtilsAndCommons;
-import com.alibaba.nacos.naming.push.PushService;
+import com.alibaba.nacos.naming.push.UdpPushService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
-
-import java.net.HttpURLConnection;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Health check public methods.
@@ -60,51 +46,7 @@ public class HealthCheckCommon {
     private SwitchDomain switchDomain;
     
     @Autowired
-    private ServerMemberManager memberManager;
-    
-    @Autowired
-    private PushService pushService;
-    
-    private static LinkedBlockingDeque<HealthCheckResult> healthCheckResults = new LinkedBlockingDeque<>(1024 * 128);
-    
-    /**
-     * Init Health check.
-     */
-    public void init() {
-        GlobalExecutor.scheduleNamingHealthCheck(() -> {
-            List list = Arrays.asList(healthCheckResults.toArray());
-            healthCheckResults.clear();
-            
-            Collection<Member> sameSiteServers = memberManager.allMembers();
-            
-            if (sameSiteServers == null || sameSiteServers.size() <= 0) {
-                return;
-            }
-            
-            for (Member server : sameSiteServers) {
-                if (server.getAddress().equals(NetUtils.localServer())) {
-                    continue;
-                }
-                Map<String, String> params = new HashMap<>(10);
-                params.put("result", JacksonUtils.toJson(list));
-                if (Loggers.SRV_LOG.isDebugEnabled()) {
-                    Loggers.SRV_LOG.debug("[HEALTH-SYNC] server: {}, healthCheckResults: {}", server,
-                            JacksonUtils.toJson(list));
-                }
-                
-                HttpClient.HttpResult httpResult = HttpClient.httpPost(
-                        "http://" + server.getAddress() + ApplicationUtils.getContextPath()
-                                + UtilsAndCommons.NACOS_NAMING_CONTEXT + "/api/healthCheckResult", null, params);
-                
-                if (httpResult.code != HttpURLConnection.HTTP_OK) {
-                    Loggers.EVT_LOG.warn("[HEALTH-CHECK-SYNC] failed to send result to {}, result: {}", server,
-                            JacksonUtils.toJson(list));
-                }
-                
-            }
-            
-        }, 500, TimeUnit.MILLISECONDS);
-    }
+    private UdpPushService pushService;
     
     /**
      * Re-evaluate check responsce time.
@@ -157,11 +99,13 @@ public class HealthCheckCommon {
                         Service service = cluster.getService();
                         service.setLastModifiedMillis(System.currentTimeMillis());
                         pushService.serviceChanged(service);
-                        addResult(new HealthCheckResult(service.getName(), ip));
                         
                         Loggers.EVT_LOG.info("serviceName: {} {POS} {IP-ENABLED} valid: {}:{}@{}, region: {}, msg: {}",
                                 cluster.getService().getName(), ip.getIp(), ip.getPort(), cluster.getName(),
                                 UtilsAndCommons.LOCALHOST_SITE, msg);
+                        NotifyCenter.publishEvent(new HealthStateChangeTraceEvent(System.currentTimeMillis(),
+                                service.getNamespaceId(), service.getGroupName(), service.getName(), ip.getIp(), ip.getPort(),
+                                true, msg));
                     } else {
                         if (!ip.isMockValid()) {
                             ip.setMockValid(true);
@@ -204,7 +148,6 @@ public class HealthCheckCommon {
                         
                         Service service = cluster.getService();
                         service.setLastModifiedMillis(System.currentTimeMillis());
-                        addResult(new HealthCheckResult(service.getName(), ip));
                         
                         pushService.serviceChanged(service);
                         
@@ -212,6 +155,9 @@ public class HealthCheckCommon {
                                 .info("serviceName: {} {POS} {IP-DISABLED} invalid: {}:{}@{}, region: {}, msg: {}",
                                         cluster.getService().getName(), ip.getIp(), ip.getPort(), cluster.getName(),
                                         UtilsAndCommons.LOCALHOST_SITE, msg);
+                        NotifyCenter.publishEvent(new HealthStateChangeTraceEvent(System.currentTimeMillis(),
+                                service.getNamespaceId(), service.getGroupName(), service.getName(), ip.getIp(),
+                                ip.getPort(), false, msg));
                     } else {
                         Loggers.EVT_LOG
                                 .info("serviceName: {} {PROBE} {IP-DISABLED} invalid: {}:{}@{}, region: {}, msg: {}",
@@ -253,12 +199,15 @@ public class HealthCheckCommon {
                     service.setLastModifiedMillis(System.currentTimeMillis());
                     
                     pushService.serviceChanged(service);
-                    addResult(new HealthCheckResult(service.getName(), ip));
                     
                     Loggers.EVT_LOG
                             .info("serviceName: {} {POS} {IP-DISABLED} invalid-now: {}:{}@{}, region: {}, msg: {}",
                                     cluster.getService().getName(), ip.getIp(), ip.getPort(), cluster.getName(),
                                     UtilsAndCommons.LOCALHOST_SITE, msg);
+                    NotifyCenter.publishEvent(new HealthStateChangeTraceEvent(System.currentTimeMillis(),
+                            service.getNamespaceId(), service.getGroupName(), service.getName(), ip.getIp(),
+                            ip.getPort(), false, msg));
+                    
                 } else {
                     if (ip.isMockValid()) {
                         ip.setMockValid(false);
@@ -266,6 +215,7 @@ public class HealthCheckCommon {
                                 .info("serviceName: {} {PROBE} {IP-DISABLED} invalid-now: {}:{}@{}, region: {}, msg: {}",
                                         cluster.getService().getName(), ip.getIp(), ip.getPort(), cluster.getName(),
                                         UtilsAndCommons.LOCALHOST_SITE, msg);
+                        Service service = cluster.getService();
                     }
                     
                 }
@@ -276,45 +226,5 @@ public class HealthCheckCommon {
         
         ip.getOkCount().set(0);
         ip.setBeingChecked(false);
-    }
-    
-    private void addResult(HealthCheckResult result) {
-        
-        if (!switchDomain.getIncrementalList().contains(result.getServiceName())) {
-            return;
-        }
-        
-        if (!healthCheckResults.offer(result)) {
-            Loggers.EVT_LOG.warn("[HEALTH-CHECK-SYNC] failed to add check result to queue, queue size: {}",
-                    healthCheckResults.size());
-        }
-    }
-    
-    static class HealthCheckResult {
-        
-        private String serviceName;
-        
-        private Instance instance;
-        
-        public HealthCheckResult(String serviceName, Instance instance) {
-            this.serviceName = serviceName;
-            this.instance = instance;
-        }
-        
-        public String getServiceName() {
-            return serviceName;
-        }
-        
-        public void setServiceName(String serviceName) {
-            this.serviceName = serviceName;
-        }
-        
-        public Instance getInstance() {
-            return instance;
-        }
-        
-        public void setInstance(Instance instance) {
-            this.instance = instance;
-        }
     }
 }

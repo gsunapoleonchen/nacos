@@ -16,20 +16,25 @@
 
 package com.alibaba.nacos.common.http;
 
-import com.alibaba.nacos.common.http.handler.RequestHandler;
+import com.alibaba.nacos.common.constant.HttpHeaderConsts;
 import com.alibaba.nacos.common.http.param.Header;
+import com.alibaba.nacos.common.http.param.MediaType;
 import com.alibaba.nacos.common.http.param.Query;
+import com.alibaba.nacos.common.utils.JacksonUtils;
 import com.alibaba.nacos.common.utils.StringUtils;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpEntityEnclosingRequest;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
 import org.apache.http.client.methods.HttpRequestBase;
+import org.apache.http.conn.ConnectTimeoutException;
+import org.apache.http.entity.ByteArrayEntity;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.message.BasicNameValuePair;
 
 import java.io.UnsupportedEncodingException;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
@@ -39,8 +44,12 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import static com.alibaba.nacos.common.constant.RequestUrlConstants.HTTPS_PREFIX;
+import static com.alibaba.nacos.common.constant.RequestUrlConstants.HTTP_PREFIX;
 
 /**
  * Http utils.
@@ -55,7 +64,7 @@ public final class HttpUtils {
      * Init http header.
      *
      * @param requestBase requestBase {@link HttpRequestBase}
-     * @param header header
+     * @param header      header
      */
     public static void initRequestHeader(HttpRequestBase requestBase, Header header) {
         Iterator<Map.Entry<String, String>> iterator = header.iterator();
@@ -69,18 +78,25 @@ public final class HttpUtils {
      * Init http entity.
      *
      * @param requestBase requestBase {@link HttpRequestBase}
-     * @param body      body
-     * @param mediaType mediaType {@link ContentType}
+     * @param body        body
+     * @param header      request header
      * @throws Exception exception
      */
-    public static void initRequestEntity(HttpRequestBase requestBase, Object body, String mediaType) throws Exception {
+    public static void initRequestEntity(HttpRequestBase requestBase, Object body, Header header) throws Exception {
         if (body == null) {
             return;
         }
         if (requestBase instanceof HttpEntityEnclosingRequest) {
             HttpEntityEnclosingRequest request = (HttpEntityEnclosingRequest) requestBase;
-            ContentType contentType = ContentType.create(mediaType);
-            StringEntity entity = new StringEntity(RequestHandler.parse(body), contentType);
+            MediaType mediaType = MediaType.valueOf(header.getValue(HttpHeaderConsts.CONTENT_TYPE));
+            ContentType contentType = ContentType.create(mediaType.getType(), mediaType.getCharset());
+            HttpEntity entity;
+            if (body instanceof byte[]) {
+                entity = new ByteArrayEntity((byte[]) body, contentType);
+            } else {
+                entity = new StringEntity(body instanceof String ? (String) body : JacksonUtils.toJson(body),
+                        contentType);
+            }
             request.setEntity(entity);
         }
     }
@@ -89,15 +105,16 @@ public final class HttpUtils {
      * Init request from entity map.
      *
      * @param requestBase requestBase {@link HttpRequestBase}
-     * @param body    body map
-     * @param charset charset of entity
+     * @param body        body map
+     * @param charset     charset of entity
      * @throws Exception exception
      */
-    public static void initRequestFromEntity(HttpRequestBase requestBase, Map<String, String> body, String charset) throws Exception {
+    public static void initRequestFromEntity(HttpRequestBase requestBase, Map<String, String> body, String charset)
+            throws Exception {
         if (body == null || body.isEmpty()) {
             return;
         }
-        List<NameValuePair> params = new ArrayList<NameValuePair>(body.size());
+        List<NameValuePair> params = new ArrayList<>(body.size());
         for (Map.Entry<String, String> entry : body.entrySet()) {
             params.add(new BasicNameValuePair(entry.getKey(), entry.getValue()));
         }
@@ -119,9 +136,9 @@ public final class HttpUtils {
     public static String buildUrl(boolean isHttps, String serverAddr, String... subPaths) {
         StringBuilder sb = new StringBuilder();
         if (isHttps) {
-            sb.append("https://");
+            sb.append(HTTPS_PREFIX);
         } else {
-            sb.append("http://");
+            sb.append(HTTP_PREFIX);
         }
         sb.append(serverAddr);
         String pre = null;
@@ -137,7 +154,7 @@ public final class HttpUtils {
                 if (subPath.startsWith("/")) {
                     sb.append(subPath);
                 } else {
-                    sb.append("/").append(subPath);
+                    sb.append('/').append(subPath);
                 }
             } else {
                 if (subPath.startsWith("/")) {
@@ -159,9 +176,9 @@ public final class HttpUtils {
      * @throws Exception exception
      */
     public static Map<String, String> translateParameterMap(Map<String, String[]> parameterMap) throws Exception {
-        Map<String, String> map = new HashMap<String, String>(16);
-        for (String key : parameterMap.keySet()) {
-            map.put(key, parameterMap.get(key)[0]);
+        Map<String, String> map = new HashMap<>(16);
+        for (Map.Entry<String, String[]> entry : parameterMap.entrySet()) {
+            map.put(entry.getKey(), entry.getValue()[0]);
         }
         return map;
     }
@@ -185,9 +202,9 @@ public final class HttpUtils {
                 continue;
             }
             
-            sb.append(entry.getKey()).append("=");
+            sb.append(entry.getKey()).append('=');
             sb.append(URLEncoder.encode(entry.getValue(), encoding));
-            sb.append("&");
+            sb.append('&');
         }
         
         return sb.toString();
@@ -208,10 +225,10 @@ public final class HttpUtils {
         }
         
         for (Iterator<String> iter = paramValues.iterator(); iter.hasNext(); ) {
-            sb.append(iter.next()).append("=");
+            sb.append(iter.next()).append('=');
             sb.append(URLEncoder.encode(iter.next(), encoding));
             if (iter.hasNext()) {
-                sb.append("&");
+                sb.append('&');
             }
         }
         return sb.toString();
@@ -229,10 +246,21 @@ public final class HttpUtils {
      * @return {@link URI}
      */
     public static URI buildUri(String url, Query query) throws URISyntaxException {
-        if (!query.isEmpty()) {
+        if (query != null && !query.isEmpty()) {
             url = url + "?" + query.toQueryUrl();
         }
         return new URI(url);
+    }
+    
+    /**
+     * HTTP request exception is a timeout exception.
+     *
+     * @param throwable http request throwable
+     * @return boolean
+     */
+    public static boolean isTimeoutException(Throwable throwable) {
+        return throwable instanceof SocketTimeoutException || throwable instanceof ConnectTimeoutException
+                || throwable instanceof TimeoutException || throwable.getCause() instanceof TimeoutException;
     }
     
     private static String innerDecode(String pre, String now, String encode) throws UnsupportedEncodingException {
@@ -245,4 +273,5 @@ public final class HttpUtils {
         now = URLDecoder.decode(now, encode);
         return innerDecode(pre, now, encode);
     }
+    
 }

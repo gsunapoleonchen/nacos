@@ -20,7 +20,7 @@ import com.alibaba.nacos.config.server.model.Page;
 import com.alibaba.nacos.config.server.service.repository.PaginationHelper;
 import com.alibaba.nacos.config.server.service.sql.EmbeddedStorageContextUtils;
 import com.alibaba.nacos.config.server.utils.PropertyUtil;
-import com.alibaba.nacos.core.utils.ApplicationUtils;
+import com.alibaba.nacos.sys.env.EnvUtil;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
@@ -51,11 +51,13 @@ class ExternalStoragePaginationHelperImpl<E> implements PaginationHelper {
      * @param rowMapper    {@link RowMapper}
      * @return Paginated data {@code <E>}
      */
+    @Override
     public Page<E> fetchPage(final String sqlCountRows, final String sqlFetchRows, final Object[] args,
             final int pageNo, final int pageSize, final RowMapper rowMapper) {
         return fetchPage(sqlCountRows, sqlFetchRows, args, pageNo, pageSize, null, rowMapper);
     }
-    
+
+    @Override
     public Page<E> fetchPage(final String sqlCountRows, final String sqlFetchRows, final Object[] args,
             final int pageNo, final int pageSize, final Long lastMaxId, final RowMapper rowMapper) {
         if (pageNo <= 0 || pageSize <= 0) {
@@ -75,7 +77,7 @@ class ExternalStoragePaginationHelperImpl<E> implements PaginationHelper {
         }
         
         // Create Page object
-        final Page<E> page = new Page<E>();
+        final Page<E> page = new Page<>();
         page.setPageNumber(pageNo);
         page.setPagesAvailable(pageCount);
         page.setTotalCount(rowCountInt);
@@ -89,9 +91,9 @@ class ExternalStoragePaginationHelperImpl<E> implements PaginationHelper {
         if (isDerby()) {
             selectSql = sqlFetchRows + " OFFSET " + startRow + " ROWS FETCH NEXT " + pageSize + " ROWS ONLY";
         } else if (lastMaxId != null) {
-            selectSql = sqlFetchRows + " and id > " + lastMaxId + " order by id asc" + " limit " + 0 + "," + pageSize;
+            selectSql = sqlFetchRows + " AND id > " + lastMaxId + " ORDER BY id ASC" + " LIMIT " + 0 + "," + pageSize;
         } else {
-            selectSql = sqlFetchRows + " limit " + startRow + "," + pageSize;
+            selectSql = sqlFetchRows + " LIMIT " + startRow + "," + pageSize;
         }
         
         List<E> result = jdbcTemplate.query(selectSql, args, rowMapper);
@@ -100,7 +102,8 @@ class ExternalStoragePaginationHelperImpl<E> implements PaginationHelper {
         }
         return page;
     }
-    
+
+    @Override
     public Page<E> fetchPageLimit(final String sqlCountRows, final String sqlFetchRows, final Object[] args,
             final int pageNo, final int pageSize, final RowMapper rowMapper) {
         if (pageNo <= 0 || pageSize <= 0) {
@@ -119,7 +122,7 @@ class ExternalStoragePaginationHelperImpl<E> implements PaginationHelper {
         }
         
         // Create Page object
-        final Page<E> page = new Page<E>();
+        final Page<E> page = new Page<>();
         page.setPageNumber(pageNo);
         page.setPagesAvailable(pageCount);
         page.setTotalCount(rowCountInt);
@@ -139,7 +142,8 @@ class ExternalStoragePaginationHelperImpl<E> implements PaginationHelper {
         }
         return page;
     }
-    
+
+    @Override
     public Page<E> fetchPageLimit(final String sqlCountRows, final Object[] args1, final String sqlFetchRows,
             final Object[] args2, final int pageNo, final int pageSize, final RowMapper rowMapper) {
         if (pageNo <= 0 || pageSize <= 0) {
@@ -158,7 +162,7 @@ class ExternalStoragePaginationHelperImpl<E> implements PaginationHelper {
         }
         
         // Create Page object
-        final Page<E> page = new Page<E>();
+        final Page<E> page = new Page<>();
         page.setPageNumber(pageNo);
         page.setPagesAvailable(pageCount);
         page.setTotalCount(rowCountInt);
@@ -178,14 +182,15 @@ class ExternalStoragePaginationHelperImpl<E> implements PaginationHelper {
         }
         return page;
     }
-    
+
+    @Override
     public Page<E> fetchPageLimit(final String sqlFetchRows, final Object[] args, final int pageNo, final int pageSize,
             final RowMapper rowMapper) {
         if (pageNo <= 0 || pageSize <= 0) {
             throw new IllegalArgumentException("pageNo and pageSize must be greater than zero");
         }
         // Create Page object
-        final Page<E> page = new Page<E>();
+        final Page<E> page = new Page<>();
         
         String selectSql = sqlFetchRows;
         if (isDerby()) {
@@ -198,12 +203,13 @@ class ExternalStoragePaginationHelperImpl<E> implements PaginationHelper {
         }
         return page;
     }
-    
+
+    @Override
     public void updateLimit(final String sql, final Object[] args) {
         String sqlUpdate = sql;
         
         if (isDerby()) {
-            sqlUpdate = sqlUpdate.replaceAll("limit \\?", "OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY");
+            sqlUpdate = sqlUpdate.replaceAll("LIMIT \\?", "OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY");
         }
         
         try {
@@ -213,8 +219,22 @@ class ExternalStoragePaginationHelperImpl<E> implements PaginationHelper {
         }
     }
     
+    public int updateLimitWithResponse(final String sql, final Object[] args) {
+        String sqlUpdate = sql;
+        
+        if (isDerby()) {
+            sqlUpdate = sqlUpdate.replaceAll("LIMIT \\?", "OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY");
+        }
+        
+        try {
+            return jdbcTemplate.update(sqlUpdate, args);
+        } finally {
+            EmbeddedStorageContextUtils.cleanAllContext();
+        }
+    }
+    
     private boolean isDerby() {
-        return (ApplicationUtils.getStandaloneMode() && !PropertyUtil.isUseExternalDB()) || PropertyUtil
+        return (EnvUtil.getStandaloneMode() && !PropertyUtil.isUseExternalDB()) || PropertyUtil
                 .isEmbeddedStorage();
     }
     

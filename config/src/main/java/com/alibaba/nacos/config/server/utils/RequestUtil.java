@@ -16,7 +16,8 @@
 
 package com.alibaba.nacos.config.server.utils;
 
-import org.apache.commons.lang3.StringUtils;
+import com.alibaba.nacos.api.common.Constants;
+import com.alibaba.nacos.common.utils.StringUtils;
 
 import javax.servlet.http.HttpServletRequest;
 
@@ -42,7 +43,7 @@ public class RequestUtil {
      * {@link HttpServletRequest#getRemoteAddr()}
      *
      * @param request {@link HttpServletRequest}
-     * @return
+     * @return remote ip address.
      */
     public static String getRemoteIp(HttpServletRequest request) {
         String xForwardedFor = request.getHeader(X_FORWARDED_FOR);
@@ -61,6 +62,19 @@ public class RequestUtil {
      */
     public static String getAppName(HttpServletRequest request) {
         return request.getHeader(CLIENT_APPNAME_HEADER);
+    }
+    
+    /**
+     * Gets the username of the client application in the Attribute.
+     *
+     * @param request {@link HttpServletRequest}
+     * @return may be return null
+     */
+    public static String getSrcUserName(HttpServletRequest request) {
+        String result = (String) request.getSession()
+                .getAttribute(com.alibaba.nacos.plugin.auth.constant.Constants.Identity.IDENTITY_ID);
+        // If auth is disabled, get username from parameters by agreed key
+        return StringUtils.isBlank(result) ? request.getParameter(Constants.USERNAME) : result;
     }
     
 }

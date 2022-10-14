@@ -17,27 +17,28 @@
 package com.alibaba.nacos.naming.healthcheck;
 
 import com.alibaba.nacos.api.naming.pojo.healthcheck.impl.Http;
+import com.alibaba.nacos.common.http.Callback;
+import com.alibaba.nacos.common.http.HttpUtils;
+import com.alibaba.nacos.common.http.client.NacosAsyncRestTemplate;
+import com.alibaba.nacos.common.http.param.Header;
+import com.alibaba.nacos.common.http.param.Query;
+import com.alibaba.nacos.common.model.RestResult;
 import com.alibaba.nacos.naming.core.Cluster;
 import com.alibaba.nacos.naming.core.Instance;
+import com.alibaba.nacos.naming.misc.HttpClientManager;
 import com.alibaba.nacos.naming.misc.SwitchDomain;
 import com.alibaba.nacos.naming.monitor.MetricsMonitor;
-import com.ning.http.client.AsyncCompletionHandler;
-import com.ning.http.client.AsyncHttpClient;
-import com.ning.http.client.AsyncHttpClientConfig;
-import com.ning.http.client.Response;
-import io.netty.channel.ConnectTimeoutException;
 import org.apache.commons.collections.CollectionUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.net.ConnectException;
 import java.net.HttpURLConnection;
-import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeoutException;
 
+import static com.alibaba.nacos.common.constant.RequestUrlConstants.HTTP_PREFIX;
 import static com.alibaba.nacos.naming.misc.Loggers.SRV_LOG;
 
 /**
@@ -45,7 +46,7 @@ import static com.alibaba.nacos.naming.misc.Loggers.SRV_LOG;
  *
  * @author xuanyin.zy
  */
-@Component
+@Component("httpHealthCheckProcessorV1")
 public class HttpHealthCheckProcessor implements HealthCheckProcessor {
     
     public static final String TYPE = "HTTP";
@@ -56,29 +57,7 @@ public class HttpHealthCheckProcessor implements HealthCheckProcessor {
     @Autowired
     private HealthCheckCommon healthCheckCommon;
     
-    private static AsyncHttpClient asyncHttpClient;
-    
-    private static final int CONNECT_TIMEOUT_MS = 500;
-    
-    static {
-        try {
-            AsyncHttpClientConfig.Builder builder = new AsyncHttpClientConfig.Builder();
-            
-            builder.setMaximumConnectionsTotal(-1);
-            builder.setMaximumConnectionsPerHost(-1);
-            builder.setAllowPoolingConnection(false);
-            builder.setFollowRedirects(false);
-            builder.setIdleConnectionTimeoutInMs(CONNECT_TIMEOUT_MS);
-            builder.setConnectionTimeoutInMs(CONNECT_TIMEOUT_MS);
-            builder.setCompressionEnabled(false);
-            builder.setIOThreadMultiplier(1);
-            builder.setMaxRequestRetry(0);
-            builder.setUserAgent("VIPServer");
-            asyncHttpClient = new AsyncHttpClient(builder.build());
-        } catch (Throwable e) {
-            SRV_LOG.error("[HEALTH-CHECK] Error while constructing HTTP asynchronous client", e);
-        }
-    }
+    private static final NacosAsyncRestTemplate ASYNC_REST_TEMPLATE = HttpClientManager.getProcessorNacosAsyncRestTemplate();
     
     @Override
     public String getType() {
@@ -120,21 +99,14 @@ public class HttpHealthCheckProcessor implements HealthCheckProcessor {
                 Http healthChecker = (Http) cluster.getHealthChecker();
                 
                 int ckPort = cluster.isUseIPPort4Check() ? ip.getPort() : cluster.getDefCkport();
-                URL host = new URL("http://" + ip.getIp() + ":" + ckPort);
+                URL host = new URL(HTTP_PREFIX + ip.getIp() + ":" + ckPort);
                 URL target = new URL(host, healthChecker.getPath());
-                
-                AsyncHttpClient.BoundRequestBuilder builder = asyncHttpClient.prepareGet(target.toString());
                 Map<String, String> customHeaders = healthChecker.getCustomHeaders();
-                for (Map.Entry<String, String> entry : customHeaders.entrySet()) {
-                    if ("Host".equals(entry.getKey())) {
-                        builder.setVirtualHost(entry.getValue());
-                        continue;
-                    }
-                    
-                    builder.setHeader(entry.getKey(), entry.getValue());
-                }
-                
-                builder.execute(new HttpHealthCheckCallback(ip, task));
+                Header header = Header.newInstance();
+                header.addAll(customHeaders);
+    
+                ASYNC_REST_TEMPLATE.get(target.toString(), header, Query.EMPTY, String.class,
+                        new HttpHealthCheckCallback(ip, task));
                 MetricsMonitor.getHttpHealthCheckMonitor().incrementAndGet();
             } catch (Throwable e) {
                 ip.setCheckRt(switchDomain.getHttpHealthParams().getMax());
@@ -145,7 +117,7 @@ public class HttpHealthCheckProcessor implements HealthCheckProcessor {
         }
     }
     
-    private class HttpHealthCheckCallback extends AsyncCompletionHandler<Integer> {
+    private class HttpHealthCheckCallback implements Callback<String> {
         
         private Instance ip;
         
@@ -159,10 +131,10 @@ public class HttpHealthCheckProcessor implements HealthCheckProcessor {
         }
         
         @Override
-        public Integer onCompleted(Response response) throws Exception {
+        public void onReceive(RestResult<String> result) {
             ip.setCheckRt(System.currentTimeMillis() - startTime);
             
-            int httpCode = response.getStatusCode();
+            int httpCode = result.getCode();
             if (HttpURLConnection.HTTP_OK == httpCode) {
                 healthCheckCommon.checkOK(ip, task, "http:" + httpCode);
                 healthCheckCommon.reEvaluateCheckRT(System.currentTimeMillis() - startTime, task,
@@ -180,19 +152,16 @@ public class HttpHealthCheckProcessor implements HealthCheckProcessor {
                         switchDomain.getHttpHealthParams());
             }
             
-            return httpCode;
         }
         
         @Override
-        public void onThrowable(Throwable t) {
+        public void onError(Throwable t) {
             ip.setCheckRt(System.currentTimeMillis() - startTime);
             
             Throwable cause = t;
             int maxStackDepth = 50;
             for (int deepth = 0; deepth < maxStackDepth && cause != null; deepth++) {
-                if (cause instanceof SocketTimeoutException || cause instanceof ConnectTimeoutException
-                        || cause instanceof org.jboss.netty.channel.ConnectTimeoutException
-                        || cause instanceof TimeoutException || cause.getCause() instanceof TimeoutException) {
+                if (HttpUtils.isTimeoutException(t)) {
                     
                     healthCheckCommon.checkFail(ip, task, "http:timeout:" + cause.getMessage());
                     healthCheckCommon.reEvaluateCheckRT(task.getCheckRtNormalized() * 2, task,
@@ -214,6 +183,11 @@ public class HttpHealthCheckProcessor implements HealthCheckProcessor {
                 healthCheckCommon.reEvaluateCheckRT(switchDomain.getHttpHealthParams().getMax(), task,
                         switchDomain.getHttpHealthParams());
             }
+        }
+        
+        @Override
+        public void onCancel() {
+        
         }
     }
 }

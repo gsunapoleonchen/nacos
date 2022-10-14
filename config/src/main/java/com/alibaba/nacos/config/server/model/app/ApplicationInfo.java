@@ -16,7 +16,7 @@
 
 package com.alibaba.nacos.config.server.model.app;
 
-import com.alibaba.nacos.core.utils.InetUtils;
+import com.alibaba.nacos.sys.utils.InetUtils;
 
 /**
  * ApplicationInfo.
@@ -84,9 +84,9 @@ public class ApplicationInfo {
     }
     
     /**
-     * Judge whether subinfo collected recently or not.
+     * Judge whether sub info collected recently or not.
      *
-     * @return The result whether subinfo collected recently or not.
+     * @return The result whether sub info collected recently or not.
      */
     public boolean isSubInfoRecentlyCollected() {
         if (System.currentTimeMillis() - this.lastSubscribeInfoCollectedTime < RECENTLY_DURATION) {
@@ -98,11 +98,11 @@ public class ApplicationInfo {
     /**
      * Judge whether current server own the lock or not.
      *
-     * @return The result whether whether current server own the lock or not.
+     * @return The result whether current server own the lock or not.
      */
     public boolean canCurrentServerOwnTheLock() {
         boolean currentOwnerIsMe =
-                subInfoCollectLockOwner == null || InetUtils.getSelfIp().equals(subInfoCollectLockOwner);
+                subInfoCollectLockOwner == null || InetUtils.getSelfIP().equals(subInfoCollectLockOwner);
         
         if (currentOwnerIsMe) {
             return true;
@@ -115,7 +115,7 @@ public class ApplicationInfo {
     }
     
     public String currentServer() {
-        return InetUtils.getSelfIp();
+        return InetUtils.getSelfIP();
     }
     
 }

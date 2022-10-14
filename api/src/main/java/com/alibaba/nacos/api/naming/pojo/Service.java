@@ -16,6 +16,7 @@
 
 package com.alibaba.nacos.api.naming.pojo;
 
+import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -29,7 +30,9 @@ import java.util.Map;
  *
  * @author nkorange
  */
-public class Service {
+public class Service implements Serializable {
+    
+    private static final long serialVersionUID = -3470985546826874460L;
     
     /**
      * service name.
@@ -51,7 +54,7 @@ public class Service {
      */
     private String groupName;
     
-    private Map<String, String> metadata = new HashMap<String, String>();
+    private Map<String, String> metadata = new HashMap<>();
     
     public Service() {
     }

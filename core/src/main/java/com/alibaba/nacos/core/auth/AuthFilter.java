@@ -16,13 +16,19 @@
 
 package com.alibaba.nacos.core.auth;
 
+import com.alibaba.nacos.auth.HttpProtocolAuthService;
+import com.alibaba.nacos.auth.annotation.Secured;
+import com.alibaba.nacos.auth.config.AuthConfigs;
 import com.alibaba.nacos.common.utils.ExceptionUtil;
+import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.core.code.ControllerMethodsCache;
-import com.alibaba.nacos.core.utils.Constants;
 import com.alibaba.nacos.core.utils.Loggers;
 import com.alibaba.nacos.core.utils.WebUtils;
-import org.apache.commons.lang3.StringUtils;
-import org.springframework.beans.factory.annotation.Autowired;
+import com.alibaba.nacos.plugin.auth.api.IdentityContext;
+import com.alibaba.nacos.plugin.auth.api.Permission;
+import com.alibaba.nacos.plugin.auth.api.Resource;
+import com.alibaba.nacos.plugin.auth.exception.AccessException;
+import com.alibaba.nacos.sys.env.Constants;
 
 import javax.servlet.Filter;
 import javax.servlet.FilterChain;
@@ -33,7 +39,6 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.lang.reflect.Method;
-import java.net.URI;
 
 /**
  * Unified filter to handle authentication and authorization.
@@ -43,14 +48,18 @@ import java.net.URI;
  */
 public class AuthFilter implements Filter {
     
-    @Autowired
-    private AuthConfigs authConfigs;
+    private final AuthConfigs authConfigs;
     
-    @Autowired
-    private AuthManager authManager;
+    private final ControllerMethodsCache methodsCache;
     
-    @Autowired
-    private ControllerMethodsCache methodsCache;
+    private final HttpProtocolAuthService protocolAuthService;
+    
+    public AuthFilter(AuthConfigs authConfigs, ControllerMethodsCache methodsCache) {
+        this.authConfigs = authConfigs;
+        this.methodsCache = methodsCache;
+        this.protocolAuthService = new HttpProtocolAuthService(authConfigs);
+        this.protocolAuthService.initialize();
+    }
     
     @Override
     public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
@@ -64,17 +73,33 @@ public class AuthFilter implements Filter {
         HttpServletRequest req = (HttpServletRequest) request;
         HttpServletResponse resp = (HttpServletResponse) response;
         
-        String userAgent = WebUtils.getUserAgent(req);
-        
-        if (StringUtils.startsWith(userAgent, Constants.NACOS_SERVER_HEADER)) {
-            chain.doFilter(request, response);
+        if (authConfigs.isEnableUserAgentAuthWhite()) {
+            String userAgent = WebUtils.getUserAgent(req);
+            if (StringUtils.startsWith(userAgent, Constants.NACOS_SERVER_HEADER)) {
+                chain.doFilter(request, response);
+                return;
+            }
+        } else if (StringUtils.isNotBlank(authConfigs.getServerIdentityKey()) && StringUtils
+                .isNotBlank(authConfigs.getServerIdentityValue())) {
+            String serverIdentity = req.getHeader(authConfigs.getServerIdentityKey());
+            if (StringUtils.isNotBlank(serverIdentity)) {
+                if (authConfigs.getServerIdentityValue().equals(serverIdentity)) {
+                    chain.doFilter(request, response);
+                    return;
+                }
+                Loggers.AUTH.warn("Invalid server identity value for {} from {}", authConfigs.getServerIdentityKey(),
+                        req.getRemoteHost());
+            }
+        } else {
+            resp.sendError(HttpServletResponse.SC_FORBIDDEN,
+                    "Invalid server identity key or value, Please make sure set `nacos.core.auth.server.identity.key`"
+                            + " and `nacos.core.auth.server.identity.value`, or open `nacos.core.auth.enable.userAgentAuthWhite`");
             return;
         }
         
         try {
             
-            String path = new URI(req.getRequestURI()).getPath();
-            Method method = methodsCache.getMethod(req.getMethod(), path);
+            Method method = methodsCache.getMethod(req);
             
             if (method == null) {
                 chain.doFilter(request, response);
@@ -88,21 +113,24 @@ public class AuthFilter implements Filter {
                 }
                 
                 Secured secured = method.getAnnotation(Secured.class);
+                if (!protocolAuthService.enableAuth(secured)) {
+                    chain.doFilter(request, response);
+                    return;
+                }
+                Resource resource = protocolAuthService.parseResource(req, secured);
+                IdentityContext identityContext = protocolAuthService.parseIdentity(req);
+                boolean result = protocolAuthService.validateIdentity(identityContext, resource);
+                if (!result) {
+                    // TODO Get reason of failure
+                    throw new AccessException("Validate Identity failed.");
+                }
+                injectIdentityId(req, identityContext);
                 String action = secured.action().toString();
-                String resource = secured.resource();
-                
-                if (StringUtils.isBlank(resource)) {
-                    ResourceParser parser = secured.parser().newInstance();
-                    resource = parser.parseName(req);
+                result = protocolAuthService.validateAuthority(identityContext, new Permission(resource, action));
+                if (!result) {
+                    // TODO Get reason of failure
+                    throw new AccessException("Validate Authority failed.");
                 }
-                
-                if (StringUtils.isBlank(resource)) {
-                    // deny if we don't find any resource:
-                    throw new AccessException("resource name invalid!");
-                }
-                
-                authManager.auth(new Permission(resource, action), authManager.login(req));
-                
             }
             chain.doFilter(request, response);
         } catch (AccessException e) {
@@ -111,13 +139,26 @@ public class AuthFilter implements Filter {
                         e.getErrMsg());
             }
             resp.sendError(HttpServletResponse.SC_FORBIDDEN, e.getErrMsg());
-            return;
         } catch (IllegalArgumentException e) {
             resp.sendError(HttpServletResponse.SC_BAD_REQUEST, ExceptionUtil.getAllExceptionMsg(e));
-            return;
         } catch (Exception e) {
-            resp.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Server failed," + e.getMessage());
-            return;
+            Loggers.AUTH.warn("[AUTH-FILTER] Server failed: ", e);
+            resp.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Server failed, " + e.getMessage());
         }
+    }
+    
+    /**
+     * Set identity id to request session, make sure some actual logic can get identity information.
+     *
+     * <p>May be replaced with whole identityContext.
+     *
+     * @param request         http request
+     * @param identityContext identity context
+     */
+    private void injectIdentityId(HttpServletRequest request, IdentityContext identityContext) {
+        String identityId = identityContext
+                .getParameter(com.alibaba.nacos.plugin.auth.constant.Constants.Identity.IDENTITY_ID, StringUtils.EMPTY);
+        request.getSession()
+                .setAttribute(com.alibaba.nacos.plugin.auth.constant.Constants.Identity.IDENTITY_ID, identityId);
     }
 }
