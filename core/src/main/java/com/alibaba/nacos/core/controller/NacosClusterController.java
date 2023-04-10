@@ -18,6 +18,7 @@ package com.alibaba.nacos.core.controller;
 
 import com.alibaba.nacos.common.model.RestResult;
 import com.alibaba.nacos.common.model.RestResultUtils;
+import com.alibaba.nacos.common.utils.JacksonUtils;
 import com.alibaba.nacos.common.utils.LoggerUtils;
 import com.alibaba.nacos.common.utils.StringUtils;
 import com.alibaba.nacos.core.cluster.Member;
@@ -100,6 +101,7 @@ public class NacosClusterController {
      * @param node {@link Member}
      * @return {@link RestResult}
      */
+    @Deprecated
     @PostMapping(value = {"/report"})
     public RestResult<String> report(@RequestBody Member node) {
         if (!node.check()) {
@@ -108,10 +110,8 @@ public class NacosClusterController {
         LoggerUtils.printIfDebugEnabled(Loggers.CLUSTER, "node state report, receive info : {}", node);
         node.setState(NodeState.UP);
         node.setFailAccessCnt(0);
-        
-        boolean result = memberManager.update(node);
-        
-        return RestResultUtils.success(Boolean.toString(result));
+        memberManager.update(node);
+        return RestResultUtils.success(JacksonUtils.toJson(memberManager.getSelf()));
     }
     
     /**
